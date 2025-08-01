@@ -1,0 +1,88 @@
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from app.database import Base
+import json
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    nickname = Column(String)
+    dob = Column(DateTime)
+    gender = Column(String)  # Nam, Nữ, Khác
+    preference = Column(String)  # Nam, Nữ, Tất cả
+    goal = Column(String)  # Mục đích tìm kiếm
+    interests = Column(Text)  # JSON string của danh sách sở thích
+    state = Column(String, default="waiting")  # waiting, searching, connected
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships - fixed to avoid ambiguous foreign keys
+    conversations_as_user1 = relationship("Conversation", foreign_keys="Conversation.user1_id", back_populates="user1")
+    conversations_as_user2 = relationship("Conversation", foreign_keys="Conversation.user2_id", back_populates="user2")
+    messages = relationship("Message", back_populates="sender")
+    
+    def get_interests_list(self):
+        """Chuyển đổi interests từ JSON string sang list"""
+        if self.interests:
+            return json.loads(self.interests)
+        return []
+    
+    def set_interests_list(self, interests_list):
+        """Chuyển đổi list interests sang JSON string"""
+        self.interests = json.dumps(interests_list)
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user1_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user2_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    conversation_type = Column(String, default="chat")  # chat, voice
+    user1_keep = Column(Boolean, default=False)
+    user2_keep = Column(Boolean, default=False)
+    last_activity = Column(DateTime(timezone=True), server_default=func.now())
+    voice_unlocked = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships - fixed to avoid ambiguous foreign keys
+    user1 = relationship("User", foreign_keys=[user1_id], back_populates="conversations_as_user1")
+    user2 = relationship("User", foreign_keys=[user2_id], back_populates="conversations_as_user2")
+    messages = relationship("Message", back_populates="conversation")
+    
+    def get_keep_status(self, user_id):
+        """Lấy trạng thái keep của user"""
+        if user_id == self.user1_id:
+            return self.user1_keep
+        elif user_id == self.user2_id:
+            return self.user2_keep
+        return False
+    
+    def set_keep_status(self, user_id, status):
+        """Set trạng thái keep của user"""
+        if user_id == self.user1_id:
+            self.user1_keep = status
+        elif user_id == self.user2_id:
+            self.user2_keep = status
+    
+    def both_kept(self):
+        """Kiểm tra xem cả hai user đã keep chưa"""
+        return self.user1_keep and self.user2_keep
+
+class Message(Base):
+    __tablename__ = "messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    message_type = Column(String, default="text")  # text, image, gif
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    conversation = relationship("Conversation", back_populates="messages")
+    sender = relationship("User", back_populates="messages") 
