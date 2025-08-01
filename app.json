@@ -1,0 +1,33 @@
+{
+  "name": "Mapmo.vn - Anonymous Web Chat",
+  "description": "Ứng dụng web chat ẩn danh cho phép người dùng trò chuyện và kết nối với nhau",
+  "repository": "https://github.com/yourusername/MM_Grok",
+  "keywords": ["python", "fastapi", "websocket", "chat", "anonymous"],
+  "env": {
+    "SECRET_KEY": {
+      "description": "Secret key for JWT tokens",
+      "generator": "secret"
+    },
+    "DATABASE_URL": {
+      "description": "Database URL",
+      "value": "sqlite:///./mapmo.db"
+    },
+    "DEBUG": {
+      "description": "Debug mode",
+      "value": "False"
+    },
+    "ALGORITHM": {
+      "description": "JWT algorithm",
+      "value": "HS256"
+    },
+    "ACCESS_TOKEN_EXPIRE_MINUTES": {
+      "description": "JWT token expiration time",
+      "value": "30"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+} 

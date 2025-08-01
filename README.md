@@ -61,11 +61,49 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Hoặc chạy trực tiếp
-python -m app.main
+python run.py
 ```
 
 ### Bước 5: Truy cập ứng dụng
 Mở trình duyệt và truy cập: `http://localhost:8000`
+
+## Deployment lên Render
+
+### Bước 1: Chuẩn bị
+Đảm bảo các file sau đã có trong project:
+- `render.yaml` - Cấu hình Render
+- `Procfile` - Lệnh khởi động
+- `runtime.txt` - Phiên bản Python
+- `requirements.txt` - Dependencies
+
+### Bước 2: Push code lên GitHub
+```bash
+git add .
+git commit -m "Prepare for deployment"
+git push origin main
+```
+
+### Bước 3: Deploy trên Render
+1. Đăng nhập vào [Render](https://render.com)
+2. Tạo "New Web Service"
+3. Kết nối với GitHub repository
+4. Chọn branch `main`
+5. Cấu hình:
+   - **Name**: `mapmo-vn`
+   - **Environment**: `Python`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+### Bước 4: Cấu hình Environment Variables
+Trong Render Dashboard, thêm các biến môi trường:
+- `SECRET_KEY`: Tạo key bảo mật
+- `DATABASE_URL`: `sqlite:///./mapmo.db`
+- `DEBUG`: `False`
+- `ALGORITHM`: `HS256`
+- `ACCESS_TOKEN_EXPIRE_MINUTES`: `30`
+
+### Bước 5: Deploy
+Click "Create Web Service" và đợi deployment hoàn tất.
 
 ## Cấu trúc dự án
 

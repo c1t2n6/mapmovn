@@ -688,7 +688,12 @@ class MapmoApp {
     }
     
     connectWebSocket() {
-        this.websocket = new WebSocket(`ws://localhost:8000/ws/${this.currentUser.id}`);
+        // Sử dụng URL động thay vì hardcode localhost
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        const wsUrl = `${protocol}//${host}/ws/${this.currentUser.id}`;
+        
+        this.websocket = new WebSocket(wsUrl);
         
         this.websocket.onopen = () => {
             console.log('WebSocket connected');
