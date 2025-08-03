@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 from app.models import User, Conversation
 from typing import List, Optional
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class MatchingService:
     def __init__(self, db: Session):
@@ -161,7 +161,8 @@ class MatchingService:
                 user1_id=user1.id,
                 user2_id=user2.id,
                 conversation_type=conversation_type,
-                is_active=True
+                is_active=True,
+                countdown_start_time=datetime.now(timezone.utc)  # Set thời gian bắt đầu countdown
             )
             
             self.db.add(conversation)

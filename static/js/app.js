@@ -100,6 +100,12 @@ class MapmoApp {
                     this.countdownTimeLeft = data.data.countdown.time_left;
                     this.countdownStartTime = data.data.countdown.start_time;
                     
+                    console.log('📊 Countdown info from server:', {
+                        time_left: this.countdownTimeLeft,
+                        start_time: this.countdownStartTime,
+                        expired: data.data.countdown.expired
+                    });
+                    
                     // Nếu countdown đã hết thời gian, kết thúc conversation
                     if (data.data.countdown.expired && !this.bothKept) {
                         this.showError('Hết thời gian! Cuộc trò chuyện sẽ kết thúc.');
@@ -1134,11 +1140,19 @@ class MapmoApp {
     
     // Countdown timer methods
     startCountdown() {
+        console.log('🚀 Starting countdown with:', {
+            countdownStartTime: this.countdownStartTime,
+            countdownTimeLeft: this.countdownTimeLeft,
+            bothKept: this.bothKept
+        });
+        
         // Nếu đã có thông tin từ server, sử dụng thời gian từ server
         if (this.countdownStartTime) {
             this.countdownTimeLeft = this.calculateTimeLeftFromServer();
+            console.log('📊 Using server time, calculated time left:', this.countdownTimeLeft);
         } else {
             this.countdownTimeLeft = this.countdownDuration;
+            console.log('📊 Using default duration:', this.countdownTimeLeft);
         }
         
         this.updateCountdownDisplay();
@@ -1160,6 +1174,7 @@ class MapmoApp {
     
     calculateTimeLeftFromServer() {
         if (!this.countdownStartTime) {
+            console.log('⚠️ No countdown start time available');
             return this.countdownDuration;
         }
         
@@ -1167,16 +1182,26 @@ class MapmoApp {
             const startTime = new Date(this.countdownStartTime);
             const now = new Date();
             
-            // Đảm bảo cả hai đều sử dụng UTC
-            const startTimeUTC = new Date(startTime.getTime() - (startTime.getTimezoneOffset() * 60000));
-            const nowUTC = new Date(now.getTime() - (now.getTimezoneOffset() * 60000));
+            console.log('🕐 Time calculation:', {
+                startTime: startTime.toISOString(),
+                now: now.toISOString(),
+                startTimeLocal: startTime.toString(),
+                nowLocal: now.toString()
+            });
             
-            const elapsed = Math.floor((nowUTC - startTimeUTC) / 1000);
+            // Tính toán thời gian đã trôi qua (không cần chuyển đổi timezone vì đã là UTC)
+            const elapsed = Math.floor((now - startTime) / 1000);
             const timeLeft = this.countdownDuration - elapsed;
+            
+            console.log('⏱️ Time calculation result:', {
+                elapsed: elapsed,
+                timeLeft: timeLeft,
+                duration: this.countdownDuration
+            });
             
             return Math.max(0, timeLeft);
         } catch (error) {
-            console.error('Error calculating time left from server:', error);
+            console.error('❌ Error calculating time left from server:', error);
             return this.countdownDuration;
         }
     }
@@ -1196,43 +1221,59 @@ class MapmoApp {
                 const serverTimeLeft = data.data.time_left;
                 const serverExpired = data.data.expired;
                 const serverBothKept = data.data.both_kept;
+                const serverStartTime = data.data.start_time;
+                
+                console.log('🔄 Countdown sync with server:', {
+                    serverTimeLeft: serverTimeLeft,
+                    localTimeLeft: this.countdownTimeLeft,
+                    serverExpired: serverExpired,
+                    serverBothKept: serverBothKept,
+                    serverStartTime: serverStartTime
+                });
                 
                 // Cập nhật trạng thái keep
                 this.setBothKeptStatus(serverBothKept);
                 
+                // Cập nhật start time nếu chưa có
+                if (!this.countdownStartTime && serverStartTime) {
+                    this.countdownStartTime = serverStartTime;
+                    console.log('📊 Updated countdown start time from server');
+                }
+                
                 // Nếu countdown đã hết thời gian và chưa keep, kết thúc ngay lập tức
                 if (serverExpired && !this.bothKept) {
-                    console.log('Countdown expired on server, ending conversation immediately');
+                    console.log('❌ Countdown expired on server, ending conversation immediately');
                     this.endCountdown();
                     return;
                 }
                 
                 // Sync thời gian nếu chênh lệch > 5 giây
                 if (Math.abs(this.countdownTimeLeft - serverTimeLeft) > 5) {
+                    console.log(`🔄 Syncing countdown: local=${this.countdownTimeLeft}s, server=${serverTimeLeft}s`);
                     this.countdownTimeLeft = serverTimeLeft;
-                    console.log('Countdown synced with server');
+                    this.updateCountdownDisplay();
                 }
                 
                 // Nếu thời gian còn lại <= 0, kết thúc ngay
                 if (this.countdownTimeLeft <= 0 && !this.bothKept) {
-                    console.log('Countdown time left <= 0, ending conversation');
+                    console.log('❌ Countdown time left <= 0, ending conversation');
                     this.endCountdown();
                     return;
                 }
             } else if (response.status === 404) {
                 // Conversation không tồn tại, kết thúc
-                console.log('Conversation not found, ending');
+                console.log('❌ Conversation not found, ending');
                 this.handleConversationEnded({ redirect_url: '/' });
             } else if (response.status === 401) {
                 // Token hết hạn
-                console.log('Token expired during countdown sync');
+                console.log('❌ Token expired during countdown sync');
                 this.showError('Phiên đăng nhập đã hết hạn');
                 setTimeout(() => {
                     this.handleLogout();
                 }, 2000);
             }
         } catch (error) {
-            console.error('Error syncing countdown with server:', error);
+            console.error('❌ Error syncing countdown with server:', error);
             // Không làm gì nếu có lỗi network, tiếp tục với countdown local
         }
     }

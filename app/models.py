@@ -91,6 +91,13 @@ class Conversation(Base):
         elapsed = (now - start_time).total_seconds()
         time_left = 300 - elapsed  # 300 giây = 5 phút
         
+        # Debug log
+        print(f"🔍 Countdown calculation for conversation {self.id}:")
+        print(f"   Start time: {start_time}")
+        print(f"   Now: {now}")
+        print(f"   Elapsed: {elapsed:.2f}s")
+        print(f"   Time left: {time_left:.2f}s")
+        
         return max(0, int(time_left))
     
     def is_countdown_expired(self):
