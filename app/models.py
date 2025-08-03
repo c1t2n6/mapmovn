@@ -102,7 +102,15 @@ class Conversation(Base):
     
     def is_countdown_expired(self):
         """Kiểm tra xem countdown đã hết thời gian chưa"""
-        return self.get_countdown_time_left() <= 0
+        time_left = self.get_countdown_time_left()
+        expired = time_left <= 0
+        
+        # Debug log
+        print(f"🔍 Countdown expired check for conversation {self.id}:")
+        print(f"   Time left: {time_left}s")
+        print(f"   Expired: {expired}")
+        
+        return expired
 
 class Message(Base):
     __tablename__ = "messages"

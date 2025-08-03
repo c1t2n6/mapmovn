@@ -116,6 +116,45 @@ class ConnectionManager:
         """Lấy trạng thái typing của tất cả user trong conversation"""
         return self.typing_status.get(conversation_id, {})
     
+    async def broadcast_countdown_update(self, conversation_id: int):
+        """Broadcast countdown update cho tất cả user trong conversation"""
+        try:
+            # Lấy thông tin countdown từ database
+            from app.database import SessionLocal
+            db = SessionLocal()
+            try:
+                conversation = db.query(Conversation).filter(
+                    Conversation.id == conversation_id,
+                    Conversation.is_active == True
+                ).first()
+                
+                if conversation:
+                    countdown_time_left = conversation.get_countdown_time_left()
+                    countdown_expired = conversation.is_countdown_expired()
+                    both_kept = conversation.both_kept()
+                    
+                    countdown_message = {
+                        "type": "countdown_update",
+                        "conversation_id": conversation_id,
+                        "data": {
+                            "time_left": countdown_time_left,
+                            "expired": countdown_expired,
+                            "both_kept": both_kept,
+                            "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None
+                        }
+                    }
+                    
+                    # Broadcast cho tất cả user trong conversation
+                    await self.send_to_conversation(countdown_message, conversation_id)
+                    
+                    print(f"🔄 Countdown update broadcasted for conversation {conversation_id}: {countdown_time_left}s left")
+                    
+            finally:
+                db.close()
+                
+        except Exception as e:
+            print(f"❌ Error broadcasting countdown update: {e}")
+    
     async def broadcast_typing_status(self, conversation_id: int, user_id: int, is_typing: bool):
         """Broadcast trạng thái typing cho tất cả user trong conversation"""
         self.set_typing_status(conversation_id, user_id, is_typing)
@@ -244,6 +283,8 @@ class WebSocketHandler:
         """Xử lý WebSocket connection cho user"""
         await self.manager.connect(websocket, user_id)
         
+        print(f"🔌 WebSocket connected for user {user_id}")
+        
         # Tự động thêm user vào conversation nếu họ đang trong một conversation
         await self.auto_add_to_conversation(user_id)
         
@@ -265,9 +306,10 @@ class WebSocketHandler:
                         break
                 
         except WebSocketDisconnect:
+            print(f"🔌 WebSocket disconnected for user {user_id}")
             self.manager.disconnect(user_id)
         except Exception as e:
-            print(f"WebSocket error: {e}")
+            print(f"WebSocket error for user {user_id}: {e}")
             self.manager.disconnect(user_id)
     
     async def auto_add_to_conversation(self, user_id: int):
@@ -279,6 +321,9 @@ class WebSocketHandler:
                     if info['is_active']:
                         print(f"Auto-adding user {user_id} to conversation {conversation_id} (from cache)")
                         self.manager.add_to_conversation(conversation_id, user_id)
+                        
+                        # Gửi thông báo match cho user này nếu họ chưa nhận được
+                        await self.send_match_notification_if_needed(user_id, conversation_id)
                         return
             
             # Nếu không tìm thấy trong cache, query database
@@ -294,6 +339,9 @@ class WebSocketHandler:
                 if conversation:
                     print(f"Auto-adding user {user_id} to conversation {conversation.id}")
                     self.manager.add_to_conversation(conversation.id, user_id)
+                    
+                    # Gửi thông báo match cho user này nếu họ chưa nhận được
+                    await self.send_match_notification_if_needed(user_id, conversation.id)
                 else:
                     print(f"User {user_id} is not in any active conversation")
                     
@@ -302,6 +350,45 @@ class WebSocketHandler:
                 
         except Exception as e:
             print(f"Error auto-adding user to conversation: {e}")
+    
+    async def send_match_notification_if_needed(self, user_id: int, conversation_id: int):
+        """Gửi thông báo match cho user nếu họ chưa nhận được"""
+        try:
+            from app.database import SessionLocal
+            db = SessionLocal()
+            
+            try:
+                conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+                if not conversation:
+                    return
+                
+                # Xác định user khác trong conversation
+                other_user_id = conversation.user2_id if conversation.user1_id == user_id else conversation.user1_id
+                other_user = db.query(User).filter(User.id == other_user_id).first()
+                
+                if other_user:
+                    # Gửi thông báo match
+                    match_notification = {
+                        "type": "match_found",
+                        "data": {
+                            "conversation_id": conversation_id,
+                            "conversation_type": conversation.conversation_type,
+                            "chat_url": f"/chat/{conversation_id}",
+                            "matched_user": {
+                                "id": other_user.id,
+                                "nickname": other_user.nickname
+                            }
+                        }
+                    }
+                    
+                    await self.manager.send_personal_message(match_notification, user_id)
+                    print(f"📨 Sent match notification to user {user_id} for conversation {conversation_id}")
+                    
+            finally:
+                db.close()
+                
+        except Exception as e:
+            print(f"Error sending match notification: {e}")
     
     async def process_message(self, user_id: int, message_data: dict):
         """Xử lý tin nhắn từ WebSocket"""
@@ -423,6 +510,10 @@ class WebSocketHandler:
                 }
                 
                 await self.manager.send_to_conversation(message_to_send, conversation_id, exclude_user_id=user_id)
+                
+                # Broadcast countdown update để đồng bộ trạng thái
+                await self.manager.broadcast_countdown_update(conversation_id)
+                
         except Exception as e:
             print(f"❌ Error handling keep: {e}")
             db.rollback()

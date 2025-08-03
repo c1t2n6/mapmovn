@@ -174,6 +174,8 @@ class MatchingService:
             user2_refreshed.state = "connected"
             self.db.commit()
             
+            print(f"🔄 Updated user states: User1 {user1_refreshed.id} -> connected, User2 {user2_refreshed.id} -> connected")
+            
             return conversation
             
         except Exception as e:

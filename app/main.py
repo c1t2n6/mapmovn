@@ -147,68 +147,89 @@ GOAL_OPTIONS = [
 
 # Background task để tự động xóa conversation hết countdown
 async def cleanup_expired_conversations():
-    """Background task để tự động xóa các conversation đã hết countdown"""
+    """Background task để dọn dẹp các conversation hết hạn"""
     while True:
         try:
-            # Tạo session mới cho background task
             from app.database import SessionLocal
             db = SessionLocal()
             
             try:
-                # Tìm các conversation đã hết countdown và chưa được keep
-                expired_conversations = db.query(Conversation).filter(
-                    Conversation.is_active == True,
-                    Conversation.user1_keep == False,
-                    Conversation.user2_keep == False
+                # Lấy tất cả conversation active
+                active_conversations = db.query(Conversation).filter(
+                    Conversation.is_active == True
                 ).all()
                 
-                matching_service = MatchingService(db)
-                cleaned_count = 0
-                
-                for conversation in expired_conversations:
-                    try:
-                        if conversation.is_countdown_expired():
-                            print(f"Auto ending conversation {conversation.id} due to countdown expiration")
-                            
-                            # Kết thúc conversation
-                            matching_service.end_conversation(conversation)
-                            cleaned_count += 1
-                            
-                            # Gửi thông báo kết thúc cho tất cả user trong conversation
-                            message_to_send = {
-                                "type": "conversation_ended",
-                                "data": {
-                                    "conversation_id": conversation.id,
-                                    "ended_by": "system",
-                                    "reason": "countdown_expired",
-                                    "redirect_to_waiting": True,
-                                    "redirect_url": "/"
-                                }
+                for conversation in active_conversations:
+                    # Kiểm tra xem countdown đã hết thời gian chưa
+                    if conversation.is_countdown_expired() and not conversation.both_kept():
+                        print(f"⏰ Conversation {conversation.id} expired, ending...")
+                        
+                        # Broadcast countdown update trước khi kết thúc
+                        await manager.broadcast_countdown_update(conversation.id)
+                        
+                        # Kết thúc conversation
+                        conversation.is_active = False
+                        
+                        # Cập nhật trạng thái user về waiting
+                        user1 = db.query(User).filter(User.id == conversation.user1_id).first()
+                        user2 = db.query(User).filter(User.id == conversation.user2_id).first()
+                        
+                        if user1:
+                            user1.state = "waiting"
+                        if user2:
+                            user2.state = "waiting"
+                        
+                        # Gửi thông báo kết thúc cho cả 2 user
+                        end_message = {
+                            "type": "conversation_ended",
+                            "data": {
+                                "conversation_id": conversation.id,
+                                "reason": "countdown_expired",
+                                "redirect_url": "/"
                             }
-                            
-                            # Gửi thông báo cho tất cả user trong conversation
-                            await manager.send_to_conversation(message_to_send, conversation.id)
-                            
-                            # Xóa khỏi WebSocket connections
-                            manager.remove_from_conversation(conversation.id, conversation.user1_id)
-                            manager.remove_from_conversation(conversation.id, conversation.user2_id)
-                    except Exception as e:
-                        print(f"Error processing conversation {conversation.id}: {e}")
-                        continue
+                        }
+                        
+                        await manager.send_to_conversation(end_message, conversation.id)
+                        
+                        print(f"✅ Conversation {conversation.id} ended due to countdown expiration")
                 
-                if cleaned_count > 0:
-                    print(f"Cleaned up {cleaned_count} expired conversations")
-                    
-            except Exception as e:
-                print(f"Error in cleanup_expired_conversations database operation: {e}")
+                db.commit()
+                
             finally:
                 db.close()
                 
         except Exception as e:
-            print(f"Error in cleanup_expired_conversations: {e}")
+            print(f"❌ Error in cleanup_expired_conversations: {e}")
         
         # Chạy mỗi 30 giây
         await asyncio.sleep(30)
+
+async def broadcast_countdown_updates():
+    """Background task để broadcast countdown updates cho tất cả conversation active"""
+    while True:
+        try:
+            from app.database import SessionLocal
+            db = SessionLocal()
+            
+            try:
+                # Lấy tất cả conversation active
+                active_conversations = db.query(Conversation).filter(
+                    Conversation.is_active == True
+                ).all()
+                
+                for conversation in active_conversations:
+                    # Chỉ broadcast nếu có user đang kết nối
+                    if conversation.id in manager.conversation_connections:
+                        await manager.broadcast_countdown_update(conversation.id)
+                
+            finally:
+                db.close()
+                
+        except Exception as e:
+            print(f"❌ Error in broadcast_countdown_updates: {e}")
+        
+        # Broadcast mỗi 10 giây
+        await asyncio.sleep(10)
 
 # Startup event để bắt đầu background task
 @app.on_event("startup")
@@ -221,6 +242,7 @@ async def startup_event():
     
     # Bắt đầu background task
     asyncio.create_task(cleanup_expired_conversations())
+    asyncio.create_task(broadcast_countdown_updates())
     
     print("✅ Server đã sẵn sàng!")
 
@@ -406,8 +428,33 @@ async def start_search(
             other_user_id = existing_conversation.user2_id if existing_conversation.user1_id == current_user.id else existing_conversation.user1_id
             other_user = db.query(User).filter(User.id == other_user_id).first()
             
+            # Đảm bảo user hiện tại có trạng thái "connected"
+            if current_user.state != "connected":
+                current_user.state = "connected"
+                db.commit()
+                print(f"🔄 Updated user {current_user.id} state from {current_user.state} to connected")
+            
             # Thêm vào WebSocket connections nếu chưa có
             manager.add_to_conversation(existing_conversation.id, current_user.id)
+            
+            # Gửi thông báo match qua WebSocket nếu user chưa nhận được
+            match_notification = {
+                "type": "match_found",
+                "data": {
+                    "conversation_id": existing_conversation.id,
+                    "conversation_type": existing_conversation.conversation_type,
+                    "chat_url": f"/chat/{existing_conversation.id}",
+                    "matched_user": {
+                        "id": other_user.id,
+                        "nickname": other_user.nickname
+                    }
+                }
+            }
+            
+            # Gửi thông báo match cho user hiện tại
+            await manager.send_personal_message(match_notification, current_user.id)
+            
+            print(f"🔄 User {current_user.id} already has active conversation {existing_conversation.id}, sent match notification")
             
             return SuccessResponse(
                 success=True,
@@ -450,8 +497,8 @@ async def start_search(
                 manager.add_to_conversation(conversation.id, current_user.id)
                 manager.add_to_conversation(conversation.id, match.id)
                 
-                # Gửi thông báo match qua WebSocket cho cả 2 user với URL redirect
-                match_notification = {
+                # Tạo thông báo match cho cả 2 user
+                match_notification_current = {
                     "type": "match_found",
                     "data": {
                         "conversation_id": conversation.id,
@@ -464,11 +511,29 @@ async def start_search(
                     }
                 }
                 
-                # Gửi thông báo cho user hiện tại
-                await manager.send_personal_message(match_notification, current_user.id)
+                match_notification_other = {
+                    "type": "match_found",
+                    "data": {
+                        "conversation_id": conversation.id,
+                        "conversation_type": conversation.conversation_type,
+                        "chat_url": f"/chat/{conversation.id}",
+                        "matched_user": {
+                            "id": current_user.id,
+                            "nickname": current_user.nickname
+                        }
+                    }
+                }
                 
-                # Gửi thông báo cho user được match
-                await manager.send_personal_message(match_notification, match.id)
+                # Gửi thông báo cho cả 2 user đồng thời
+                await asyncio.gather(
+                    manager.send_personal_message(match_notification_current, current_user.id),
+                    manager.send_personal_message(match_notification_other, match.id),
+                    return_exceptions=True
+                )
+                
+                print(f"🎯 Match created: User {current_user.id} ({current_user.nickname}) matched with User {match.id} ({match.nickname})")
+                print(f"   Conversation ID: {conversation.id}")
+                print(f"   WebSocket notifications sent to both users")
                 
                 return SuccessResponse(
                     success=True,
@@ -655,32 +720,41 @@ async def get_conversation_info(
     db: Session = Depends(get_db)
 ):
     """Lấy thông tin conversation và user khác"""
-    # Kiểm tra xem user có quyền xem conversation này không
-    conversation = db.query(Conversation).filter(
-        Conversation.id == conversation_id,
-        Conversation.is_active == True,
-        ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id))
-    ).first()
-    
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Không tìm thấy conversation")
-    
-    # Lấy thông tin user khác trong conversation
-    other_user_id = conversation.user2_id if conversation.user1_id == current_user.id else conversation.user1_id
-    other_user = db.query(User).filter(User.id == other_user_id).first()
-    
-    # Lấy thông tin keep status
-    current_user_kept = conversation.user1_kept if conversation.user1_id == current_user.id else conversation.user2_kept
-    both_kept = conversation.both_kept()
-    
-    # Lấy thông tin countdown
-    countdown_time_left = conversation.get_countdown_time_left()
-    countdown_expired = conversation.is_countdown_expired()
-    
-    return SuccessResponse(
-        success=True,
-        message="Thông tin conversation",
-        data={
+    try:
+        print(f"🔍 API request: User {current_user.id} ({current_user.username}) requesting conversation {conversation_id}")
+        
+        # Kiểm tra xem user có quyền xem conversation này không
+        conversation = db.query(Conversation).filter(
+            Conversation.id == conversation_id,
+            Conversation.is_active == True,
+            ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id))
+        ).first()
+        
+        if not conversation:
+            print(f"❌ Conversation {conversation_id} not found or not active for user {current_user.id}")
+            raise HTTPException(status_code=404, detail="Không tìm thấy conversation")
+        
+        print(f"✅ Found conversation {conversation_id}: User1={conversation.user1_id}, User2={conversation.user2_id}")
+        
+        # Lấy thông tin user khác trong conversation
+        other_user_id = conversation.user2_id if conversation.user1_id == current_user.id else conversation.user1_id
+        other_user = db.query(User).filter(User.id == other_user_id).first()
+        
+        if not other_user:
+            print(f"❌ Other user {other_user_id} not found for conversation {conversation_id}")
+            raise HTTPException(status_code=500, detail="Không tìm thấy thông tin user khác")
+        
+        print(f"✅ Found other user: {other_user.username} (ID: {other_user.id})")
+        
+        # Lấy thông tin keep status
+        current_user_kept = conversation.user1_keep if conversation.user1_id == current_user.id else conversation.user2_keep
+        both_kept = conversation.both_kept()
+        
+        # Lấy thông tin countdown
+        countdown_time_left = conversation.get_countdown_time_left()
+        countdown_expired = conversation.is_countdown_expired()
+        
+        response_data = {
             "conversation_id": conversation.id,
             "conversation_type": conversation.conversation_type,
             "matched_user": {
@@ -697,7 +771,19 @@ async def get_conversation_info(
                 "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None
             }
         }
-    )
+        
+        print(f"✅ Successfully returning conversation info for user {current_user.id}")
+        return SuccessResponse(
+            success=True,
+            message="Thông tin conversation",
+            data=response_data
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in get_conversation_info: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi server: {str(e)}")
 
 @app.get("/api/conversation/{conversation_id}/countdown", response_model=SuccessResponse)
 async def get_countdown_status(
@@ -706,30 +792,50 @@ async def get_countdown_status(
     db: Session = Depends(get_db)
 ):
     """Lấy thông tin countdown của conversation"""
-    conversation = db.query(Conversation).filter(
-        Conversation.id == conversation_id,
-        Conversation.is_active == True,
-        ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id))
-    ).first()
-    
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Không tìm thấy conversation")
-    
-    countdown_time_left = conversation.get_countdown_time_left()
-    countdown_expired = conversation.is_countdown_expired()
-    both_kept = conversation.both_kept()
-    
-    return SuccessResponse(
-        success=True,
-        message="Thông tin countdown",
-        data={
-            "conversation_id": conversation.id,
-            "time_left": countdown_time_left,
-            "expired": countdown_expired,
-            "both_kept": both_kept,
-            "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None
-        }
-    )
+    try:
+        conversation = db.query(Conversation).filter(
+            Conversation.id == conversation_id,
+            Conversation.is_active == True,
+            ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id))
+        ).first()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Không tìm thấy conversation")
+        
+        countdown_time_left = conversation.get_countdown_time_left()
+        countdown_expired = conversation.is_countdown_expired()
+        both_kept = conversation.both_kept()
+        
+        # Debug logging
+        print(f"🔍 Countdown API request for conversation {conversation_id}:")
+        print(f"   User: {current_user.username} (ID: {current_user.id})")
+        print(f"   Time left: {countdown_time_left}s")
+        print(f"   Expired: {countdown_expired}")
+        print(f"   Both kept: {both_kept}")
+        print(f"   Start time: {conversation.countdown_start_time}")
+        
+        return SuccessResponse(
+            success=True,
+            message="Thông tin countdown",
+            data={
+                "conversation_id": conversation.id,
+                "time_left": countdown_time_left,
+                "expired": countdown_expired,
+                "both_kept": both_kept,
+                "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None,
+                "debug_info": {
+                    "user_id": current_user.id,
+                    "conversation_type": conversation.conversation_type,
+                    "user1_keep": conversation.user1_keep,
+                    "user2_keep": conversation.user2_keep
+                }
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in countdown endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi server: {str(e)}")
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int):

@@ -104,7 +104,8 @@ class MapmoApp {
                     console.log('📊 Countdown info from server:', {
                         time_left: this.countdownTimeLeft,
                         start_time: this.countdownStartTime,
-                        expired: data.data.countdown.expired
+                        expired: data.data.countdown.expired,
+                        both_kept: data.data.countdown.both_kept
                     });
                     
                     // Nếu countdown đã hết thời gian, kết thúc conversation
@@ -114,6 +115,11 @@ class MapmoApp {
                             this.endConversation();
                         }, 2000);
                         return;
+                    }
+                    
+                    // Nếu cả 2 đã keep, dừng countdown
+                    if (data.data.countdown.both_kept) {
+                        this.setBothKeptStatus(true);
                     }
                 }
                 
@@ -818,24 +824,58 @@ class MapmoApp {
     }
     
     async handleWebSocketMessage(data) {
-        switch (data.type) {
-            case 'match_found':
-                await this.handleMatchFound(data.data);
-                break;
-            case 'chat_message':
-                // Xử lý tin nhắn thật từ server
-                this.handleRealMessage(data.data);
-                break;
-            case 'typing_status':
-                this.showTypingIndicator(data.data.is_typing);
-                break;
-            case 'keep_status':
-                this.updateKeepStatus(data.data);
-                break;
-            case 'conversation_ended':
-                // Xử lý khi conversation kết thúc - cả hai người đều chuyển về sảnh chờ
-                this.handleConversationEnded(data.data);
-                break;
+        try {
+            const message = JSON.parse(data);
+            console.log('📨 WebSocket message received:', message);
+            
+            switch (message.type) {
+                case 'chat_message':
+                    this.handleRealMessage(message.data);
+                    break;
+                case 'match_found':
+                    await this.handleMatchFound(message.data);
+                    break;
+                case 'keep_status':
+                    this.updateKeepStatus(message.data);
+                    break;
+                case 'typing_status':
+                    this.showTypingIndicator(message.data.is_typing);
+                    break;
+                case 'conversation_ended':
+                    this.handleConversationEnded(message.data);
+                    break;
+                case 'countdown_update':
+                    this.handleCountdownUpdate(message.data);
+                    break;
+                default:
+                    console.log('⚠️ Unknown message type:', message.type);
+            }
+        } catch (error) {
+            console.error('❌ Error parsing WebSocket message:', error);
+        }
+    }
+    
+    handleCountdownUpdate(data) {
+        console.log('🔄 Countdown update received:', data);
+        
+        // Cập nhật thông tin countdown từ server
+        if (data.time_left !== undefined) {
+            this.countdownTimeLeft = data.time_left;
+        }
+        if (data.start_time) {
+            this.countdownStartTime = data.start_time;
+        }
+        if (data.both_kept !== undefined) {
+            this.setBothKeptStatus(data.both_kept);
+        }
+        
+        // Cập nhật hiển thị
+        this.updateCountdownDisplay();
+        
+        // Nếu countdown đã hết thời gian và chưa keep, kết thúc
+        if (data.expired && !this.bothKept) {
+            console.log('❌ Countdown expired from server update');
+            this.endCountdown();
         }
     }
     
@@ -860,21 +900,38 @@ class MapmoApp {
     }
     
     async handleMatchFound(matchData) {
+        console.log('🎯 Match found notification received:', matchData);
+        
         // Lưu thông tin conversation
         this.currentConversation = matchData;
         
-        // Redirect đến URL chatroom mới
-        if (matchData.chat_url) {
-            window.location.href = matchData.chat_url;
-        } else {
-            // Fallback: chuyển sang chat interface nếu không có URL
-            await this.showChatInterface();
-            
-            // Kết nối WebSocket nếu chưa kết nối
-            if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
-                this.connectWebSocket();
-            }
+        // Hiển thị thông báo match thành công
+        this.showSuccess(`Đã kết nối với ${matchData.matched_user?.nickname || 'người lạ'}! 🎉`);
+        
+        // Dừng interval cập nhật số người đang tìm kiếm nếu có
+        if (this.searchingCountInterval) {
+            clearInterval(this.searchingCountInterval);
+            this.searchingCountInterval = null;
         }
+        
+        // Kiểm tra xem user có đang ở trang tìm kiếm không
+        const isCurrentlySearching = document.querySelector('.searching-container') !== null;
+        console.log('🔍 User currently searching:', isCurrentlySearching);
+        
+        // Chuyển sang chat interface ngay lập tức
+        await this.showChatInterface();
+        
+        // Kết nối WebSocket nếu chưa kết nối
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+            this.connectWebSocket();
+        }
+        
+        // Cập nhật URL trong browser để có thể bookmark hoặc share
+        if (matchData.chat_url) {
+            window.history.pushState({ conversationId: matchData.conversation_id }, '', matchData.chat_url);
+        }
+        
+        console.log('✅ Successfully switched to chat interface for match');
     }
     
     setupChatEventListeners() {
@@ -1196,11 +1253,31 @@ class MapmoApp {
             this.countdownTimeLeft = this.calculateTimeLeftFromServer();
             console.log('📊 Using server time, calculated time left:', this.countdownTimeLeft);
         } else {
-            this.countdownTimeLeft = this.countdownDuration;
-            console.log('📊 Using default duration:', this.countdownTimeLeft);
+            // Nếu chưa có start time, sync với server trước
+            console.log('📊 No start time available, syncing with server first');
+            this.syncCountdownWithServer().then(() => {
+                // Sau khi sync, tính toán lại thời gian
+                if (this.countdownStartTime) {
+                    this.countdownTimeLeft = this.calculateTimeLeftFromServer();
+                    console.log('📊 After sync, calculated time left:', this.countdownTimeLeft);
+                } else {
+                    this.countdownTimeLeft = this.countdownDuration;
+                    console.log('📊 Using default duration after sync:', this.countdownTimeLeft);
+                }
+                this.updateCountdownDisplay();
+            });
+            return; // Thoát sớm, sẽ tiếp tục sau khi sync
         }
         
         this.updateCountdownDisplay();
+        
+        // Clear interval cũ nếu có
+        if (this.countdownInterval) {
+            clearInterval(this.countdownInterval);
+        }
+        if (this.serverSyncInterval) {
+            clearInterval(this.serverSyncInterval);
+        }
         
         this.countdownInterval = setInterval(() => {
             this.countdownTimeLeft--;
@@ -1211,10 +1288,15 @@ class MapmoApp {
             }
         }, 1000);
         
-        // Sync với server mỗi 30 giây để đảm bảo đồng bộ
+        // Sync với server mỗi 15 giây để đảm bảo đồng bộ (giảm từ 30s xuống 15s)
         this.serverSyncInterval = setInterval(() => {
             this.syncCountdownWithServer();
-        }, 30000);
+        }, 15000);
+        
+        // Sync ngay lập tức sau 2 giây để đảm bảo đồng bộ ban đầu
+        setTimeout(() => {
+            this.syncCountdownWithServer();
+        }, 2000);
     }
     
     calculateTimeLeftFromServer() {
@@ -1227,6 +1309,12 @@ class MapmoApp {
             const startTime = new Date(this.countdownStartTime);
             const now = new Date();
             
+            // Đảm bảo cả hai thời gian đều có timezone info
+            if (startTime.toString() === 'Invalid Date') {
+                console.error('❌ Invalid start time format:', this.countdownStartTime);
+                return this.countdownDuration;
+            }
+            
             console.log('🕐 Time calculation:', {
                 startTime: startTime.toISOString(),
                 now: now.toISOString(),
@@ -1234,8 +1322,8 @@ class MapmoApp {
                 nowLocal: now.toString()
             });
             
-            // Tính toán thời gian đã trôi qua (không cần chuyển đổi timezone vì đã là UTC)
-            const elapsed = Math.floor((now - startTime) / 1000);
+            // Tính toán thời gian đã trôi qua (tính bằng milliseconds)
+            const elapsed = Math.floor((now.getTime() - startTime.getTime()) / 1000);
             const timeLeft = this.countdownDuration - elapsed;
             
             console.log('⏱️ Time calculation result:', {
@@ -1279,10 +1367,12 @@ class MapmoApp {
                 // Cập nhật trạng thái keep
                 this.setBothKeptStatus(serverBothKept);
                 
-                // Cập nhật start time nếu chưa có
-                if (!this.countdownStartTime && serverStartTime) {
-                    this.countdownStartTime = serverStartTime;
-                    console.log('📊 Updated countdown start time from server');
+                // Cập nhật start time nếu chưa có hoặc khác với server
+                if (serverStartTime) {
+                    if (!this.countdownStartTime || this.countdownStartTime !== serverStartTime) {
+                        this.countdownStartTime = serverStartTime;
+                        console.log('📊 Updated countdown start time from server');
+                    }
                 }
                 
                 // Nếu countdown đã hết thời gian và chưa keep, kết thúc ngay lập tức
@@ -1292,8 +1382,8 @@ class MapmoApp {
                     return;
                 }
                 
-                // Sync thời gian nếu chênh lệch > 5 giây
-                if (Math.abs(this.countdownTimeLeft - serverTimeLeft) > 5) {
+                // Sync thời gian nếu chênh lệch > 3 giây (giảm từ 5s xuống 3s)
+                if (Math.abs(this.countdownTimeLeft - serverTimeLeft) > 3) {
                     console.log(`🔄 Syncing countdown: local=${this.countdownTimeLeft}s, server=${serverTimeLeft}s`);
                     this.countdownTimeLeft = serverTimeLeft;
                     this.updateCountdownDisplay();
