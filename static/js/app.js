@@ -5,6 +5,14 @@ class MapmoApp {
         this.currentConversation = null;
         this.websocket = null;
         this.pendingTempMessage = null; // Tin nhắn tạm thời đang chờ
+        
+        // Countdown timer properties
+        this.countdownTimer = null;
+        this.countdownInterval = null;
+        this.countdownDuration = 5 * 60; // 5 phút = 300 giây
+        this.countdownTimeLeft = this.countdownDuration;
+        this.bothKept = false; // Trạng thái cả 2 người đã keep
+        
         this.init();
     }
     
@@ -78,6 +86,13 @@ class MapmoApp {
                     conversation_type: data.data.conversation_type,
                     matched_user: data.data.matched_user
                 };
+                
+                // Cập nhật trạng thái keep
+                if (data.data.keep_status) {
+                    this.keepStatus = data.data.keep_status.current_user_kept;
+                    this.setBothKeptStatus(data.data.keep_status.both_kept);
+                }
+                
                 this.showChatInterface();
             } else if (response.status === 404) {
                 this.showError('Phòng chat không tồn tại hoặc đã bị đóng');
@@ -635,6 +650,9 @@ class MapmoApp {
         
         this.connectWebSocket();
         this.setupChatEventListeners();
+        
+        // Bắt đầu countdown timer
+        this.startCountdown();
     }
     
     async loadMessageHistory() {
@@ -920,6 +938,7 @@ class MapmoApp {
         const keepBtn = document.getElementById('keepBtn');
         if (data.both_kept) {
             keepBtn.innerHTML = '💖';
+            this.setBothKeptStatus(true);
         } else if (data.keep_status) {
             keepBtn.innerHTML = '💗';
         } else {
@@ -951,6 +970,9 @@ class MapmoApp {
     }
     
     handleConversationEnded(data = {}) {
+        // Dừng countdown timer
+        this.stopCountdown();
+        
         if (this.websocket) {
             this.websocket.close();
         }
@@ -975,6 +997,9 @@ class MapmoApp {
         } catch (error) {
             console.error('Logout error:', error);
         }
+        
+        // Dừng countdown timer
+        this.stopCountdown();
         
         localStorage.removeItem('access_token');
         this.currentUser = null;
@@ -1015,20 +1040,93 @@ class MapmoApp {
             position: fixed;
             top: 20px;
             right: 20px;
-            background: #4ecdc4;
+            background: #4CAF50;
             color: white;
-            padding: 15px 20px;
-            border-radius: 10px;
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            padding: 12px 20px;
+            border-radius: 4px;
             z-index: 1000;
+            animation: slideIn 0.3s ease;
         `;
         toast.textContent = message;
-        
         document.body.appendChild(toast);
         
         setTimeout(() => {
             toast.remove();
         }, 3000);
+    }
+    
+    // Countdown timer methods
+    startCountdown() {
+        this.countdownTimeLeft = this.countdownDuration;
+        this.updateCountdownDisplay();
+        
+        this.countdownInterval = setInterval(() => {
+            this.countdownTimeLeft--;
+            this.updateCountdownDisplay();
+            
+            if (this.countdownTimeLeft <= 0) {
+                this.endCountdown();
+            }
+        }, 1000);
+    }
+    
+    stopCountdown() {
+        if (this.countdownInterval) {
+            clearInterval(this.countdownInterval);
+            this.countdownInterval = null;
+        }
+    }
+    
+    updateCountdownDisplay() {
+        const headerElement = document.querySelector('.chat-header h3');
+        if (!headerElement) return;
+        
+        if (this.bothKept) {
+            // Nếu cả 2 đã keep, hiển thị "Đã kết nối"
+            headerElement.textContent = 'Đã kết nối';
+            headerElement.style.color = '#4CAF50';
+            headerElement.className = ''; // Xóa tất cả class countdown
+        } else {
+            // Hiển thị countdown
+            const minutes = Math.floor(this.countdownTimeLeft / 60);
+            const seconds = this.countdownTimeLeft % 60;
+            const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            
+            headerElement.textContent = `⏰ ${timeString}`;
+            headerElement.className = 'countdown'; // Thêm class countdown
+            
+            // Đổi màu và animation khi gần hết thời gian
+            if (this.countdownTimeLeft <= 30) {
+                headerElement.style.color = '#ff6b6b'; // Đỏ khi còn 30s
+                headerElement.classList.add('danger');
+                headerElement.classList.remove('warning');
+            } else if (this.countdownTimeLeft <= 60) {
+                headerElement.style.color = '#ffa726'; // Cam khi còn 1 phút
+                headerElement.classList.add('warning');
+                headerElement.classList.remove('danger');
+            } else {
+                headerElement.style.color = '#2196F3'; // Xanh dương
+                headerElement.classList.remove('warning', 'danger');
+            }
+        }
+    }
+    
+    endCountdown() {
+        this.stopCountdown();
+        this.showError('Hết thời gian! Cuộc trò chuyện sẽ kết thúc.');
+        
+        // Tự động kết thúc conversation sau 2 giây
+        setTimeout(() => {
+            this.endConversation();
+        }, 2000);
+    }
+    
+    setBothKeptStatus(bothKept) {
+        this.bothKept = bothKept;
+        if (bothKept) {
+            this.stopCountdown();
+            this.updateCountdownDisplay();
+        }
     }
     
     async updateSearchingCount() {

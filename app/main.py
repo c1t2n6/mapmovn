@@ -465,6 +465,10 @@ async def get_conversation_info(
     other_user_id = conversation.user2_id if conversation.user1_id == current_user.id else conversation.user1_id
     other_user = db.query(User).filter(User.id == other_user_id).first()
     
+    # Lấy thông tin keep status
+    current_user_kept = conversation.user1_kept if conversation.user1_id == current_user.id else conversation.user2_kept
+    both_kept = conversation.both_kept()
+    
     return SuccessResponse(
         success=True,
         message="Thông tin conversation",
@@ -474,6 +478,10 @@ async def get_conversation_info(
             "matched_user": {
                 "id": other_user.id,
                 "nickname": other_user.nickname
+            },
+            "keep_status": {
+                "current_user_kept": current_user_kept,
+                "both_kept": both_kept
             }
         }
     )
