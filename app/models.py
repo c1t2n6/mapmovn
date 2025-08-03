@@ -48,6 +48,7 @@ class Conversation(Base):
     voice_unlocked = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    countdown_start_time = Column(DateTime(timezone=True), server_default=func.now())  # Thời gian bắt đầu countdown
     
     # Relationships - fixed to avoid ambiguous foreign keys
     user1 = relationship("User", foreign_keys=[user1_id], back_populates="conversations_as_user1")
@@ -72,6 +73,22 @@ class Conversation(Base):
     def both_kept(self):
         """Kiểm tra xem cả hai user đã keep chưa"""
         return self.user1_keep and self.user2_keep
+    
+    def get_countdown_time_left(self):
+        """Tính toán thời gian còn lại của countdown (5 phút = 300 giây)"""
+        from datetime import datetime, timezone
+        if not self.countdown_start_time:
+            return 300  # 5 phút mặc định
+        
+        now = datetime.now(timezone.utc)
+        elapsed = (now - self.countdown_start_time).total_seconds()
+        time_left = 300 - elapsed  # 300 giây = 5 phút
+        
+        return max(0, int(time_left))
+    
+    def is_countdown_expired(self):
+        """Kiểm tra xem countdown đã hết thời gian chưa"""
+        return self.get_countdown_time_left() <= 0
 
 class Message(Base):
     __tablename__ = "messages"

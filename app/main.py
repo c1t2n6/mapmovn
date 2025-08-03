@@ -469,6 +469,10 @@ async def get_conversation_info(
     current_user_kept = conversation.user1_kept if conversation.user1_id == current_user.id else conversation.user2_kept
     both_kept = conversation.both_kept()
     
+    # Lấy thông tin countdown
+    countdown_time_left = conversation.get_countdown_time_left()
+    countdown_expired = conversation.is_countdown_expired()
+    
     return SuccessResponse(
         success=True,
         message="Thông tin conversation",
@@ -482,7 +486,44 @@ async def get_conversation_info(
             "keep_status": {
                 "current_user_kept": current_user_kept,
                 "both_kept": both_kept
+            },
+            "countdown": {
+                "time_left": countdown_time_left,
+                "expired": countdown_expired,
+                "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None
             }
+        }
+    )
+
+@app.get("/api/conversation/{conversation_id}/countdown", response_model=SuccessResponse)
+async def get_countdown_status(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Lấy thông tin countdown của conversation"""
+    conversation = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.is_active == True,
+        ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id))
+    ).first()
+    
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Không tìm thấy conversation")
+    
+    countdown_time_left = conversation.get_countdown_time_left()
+    countdown_expired = conversation.is_countdown_expired()
+    both_kept = conversation.both_kept()
+    
+    return SuccessResponse(
+        success=True,
+        message="Thông tin countdown",
+        data={
+            "conversation_id": conversation.id,
+            "time_left": countdown_time_left,
+            "expired": countdown_expired,
+            "both_kept": both_kept,
+            "start_time": conversation.countdown_start_time.isoformat() if conversation.countdown_start_time else None
         }
     )
 

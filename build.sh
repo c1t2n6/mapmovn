@@ -16,4 +16,8 @@ Base.metadata.create_all(bind=engine)
 print('Database setup completed')
 "
 
+# Run migration for countdown feature
+echo "🔄 Running countdown migration..."
+python migrate_countdown.py
+
 echo "✅ Build completed successfully!" 

@@ -12,6 +12,8 @@ class MapmoApp {
         this.countdownDuration = 5 * 60; // 5 phút = 300 giây
         this.countdownTimeLeft = this.countdownDuration;
         this.bothKept = false; // Trạng thái cả 2 người đã keep
+        this.countdownStartTime = null; // Thời gian bắt đầu từ server
+        this.serverSyncInterval = null; // Interval để sync với server
         
         this.init();
     }
@@ -91,6 +93,21 @@ class MapmoApp {
                 if (data.data.keep_status) {
                     this.keepStatus = data.data.keep_status.current_user_kept;
                     this.setBothKeptStatus(data.data.keep_status.both_kept);
+                }
+                
+                // Cập nhật thông tin countdown từ server
+                if (data.data.countdown) {
+                    this.countdownTimeLeft = data.data.countdown.time_left;
+                    this.countdownStartTime = data.data.countdown.start_time;
+                    
+                    // Nếu countdown đã hết thời gian, kết thúc conversation
+                    if (data.data.countdown.expired && !this.bothKept) {
+                        this.showError('Hết thời gian! Cuộc trò chuyện sẽ kết thúc.');
+                        setTimeout(() => {
+                            this.endConversation();
+                        }, 2000);
+                        return;
+                    }
                 }
                 
                 this.showChatInterface();
@@ -1057,7 +1074,13 @@ class MapmoApp {
     
     // Countdown timer methods
     startCountdown() {
-        this.countdownTimeLeft = this.countdownDuration;
+        // Nếu đã có thông tin từ server, sử dụng thời gian từ server
+        if (this.countdownStartTime) {
+            this.countdownTimeLeft = this.calculateTimeLeftFromServer();
+        } else {
+            this.countdownTimeLeft = this.countdownDuration;
+        }
+        
         this.updateCountdownDisplay();
         
         this.countdownInterval = setInterval(() => {
@@ -1068,12 +1091,70 @@ class MapmoApp {
                 this.endCountdown();
             }
         }, 1000);
+        
+        // Sync với server mỗi 30 giây để đảm bảo đồng bộ
+        this.serverSyncInterval = setInterval(() => {
+            this.syncCountdownWithServer();
+        }, 30000);
+    }
+    
+    calculateTimeLeftFromServer() {
+        if (!this.countdownStartTime) {
+            return this.countdownDuration;
+        }
+        
+        const startTime = new Date(this.countdownStartTime);
+        const now = new Date();
+        const elapsed = Math.floor((now - startTime) / 1000);
+        const timeLeft = this.countdownDuration - elapsed;
+        
+        return Math.max(0, timeLeft);
+    }
+    
+    async syncCountdownWithServer() {
+        if (!this.currentConversation) return;
+        
+        try {
+            const response = await fetch(`/api/conversation/${this.currentConversation.conversation_id}/countdown`, {
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                const serverTimeLeft = data.data.time_left;
+                const serverExpired = data.data.expired;
+                const serverBothKept = data.data.both_kept;
+                
+                // Cập nhật trạng thái keep
+                this.setBothKeptStatus(serverBothKept);
+                
+                // Nếu countdown đã hết thời gian và chưa keep, kết thúc
+                if (serverExpired && !this.bothKept) {
+                    this.endCountdown();
+                    return;
+                }
+                
+                // Sync thời gian nếu chênh lệch > 5 giây
+                if (Math.abs(this.countdownTimeLeft - serverTimeLeft) > 5) {
+                    this.countdownTimeLeft = serverTimeLeft;
+                    console.log('Countdown synced with server');
+                }
+            }
+        } catch (error) {
+            console.error('Error syncing countdown with server:', error);
+        }
     }
     
     stopCountdown() {
         if (this.countdownInterval) {
             clearInterval(this.countdownInterval);
             this.countdownInterval = null;
+        }
+        if (this.serverSyncInterval) {
+            clearInterval(this.serverSyncInterval);
+            this.serverSyncInterval = null;
         }
     }
     

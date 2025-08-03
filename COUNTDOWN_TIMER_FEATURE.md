@@ -11,6 +11,12 @@ Chức năng countdown timer được thêm vào chat room để tạo áp lực
 - **Hiển thị**: Thay thế chữ "Đã kết nối" bằng đồng hồ đếm ngược
 - **Format**: `⏰ MM:SS` (ví dụ: `⏰ 4:59`)
 
+### 🔄 Server-Synchronized Countdown
+- **Database Storage**: Thời gian bắt đầu được lưu trong database
+- **Cross-User Sync**: Đồng bộ giữa 2 user trong cùng conversation
+- **Reload Persistence**: Không bị reset khi reload trang
+- **Real-time Sync**: Tự động sync với server mỗi 30 giây
+
 ### 🎨 Visual Feedback
 - **Màu xanh dương** (#2196F3): Thời gian còn nhiều (> 1 phút)
 - **Màu cam** (#ffa726): Cảnh báo khi còn 1 phút
@@ -29,39 +35,43 @@ Chức năng countdown timer được thêm vào chat room để tạo áp lực
 
 ## Cách hoạt động
 
-### 1. Khi vào Chat Room
-```javascript
-// Tự động bắt đầu countdown
-this.startCountdown();
+### 1. Database Schema
+```sql
+ALTER TABLE conversations 
+ADD COLUMN countdown_start_time DATETIME DEFAULT CURRENT_TIMESTAMP;
 ```
 
-### 2. Countdown Logic
-```javascript
-// Cập nhật mỗi giây
-setInterval(() => {
-    this.countdownTimeLeft--;
-    this.updateCountdownDisplay();
-    
-    if (this.countdownTimeLeft <= 0) {
-        this.endCountdown();
-    }
-}, 1000);
+### 2. Server-Side Countdown Logic
+```python
+def get_countdown_time_left(self):
+    """Tính toán thời gian còn lại của countdown"""
+    now = datetime.now(timezone.utc)
+    elapsed = (now - self.countdown_start_time).total_seconds()
+    time_left = 300 - elapsed  # 300 giây = 5 phút
+    return max(0, int(time_left))
 ```
 
-### 3. Keep Button Logic
+### 3. Client-Side Sync
 ```javascript
-// Khi cả 2 đã keep
-if (data.both_kept) {
-    this.setBothKeptStatus(true);
-    this.stopCountdown();
-    // Hiển thị "Đã kết nối"
+// Sync với server mỗi 30 giây
+this.serverSyncInterval = setInterval(() => {
+    this.syncCountdownWithServer();
+}, 30000);
+
+// Tính toán thời gian từ server
+calculateTimeLeftFromServer() {
+    const startTime = new Date(this.countdownStartTime);
+    const now = new Date();
+    const elapsed = Math.floor((now - startTime) / 1000);
+    const timeLeft = this.countdownDuration - elapsed;
+    return Math.max(0, timeLeft);
 }
 ```
 
 ## API Endpoints
 
 ### GET `/api/conversation/{conversation_id}`
-Trả về thông tin keep status:
+Trả về thông tin keep status và countdown:
 ```json
 {
     "success": true,
@@ -72,7 +82,27 @@ Trả về thông tin keep status:
         "keep_status": {
             "current_user_kept": true,
             "both_kept": false
+        },
+        "countdown": {
+            "time_left": 245,
+            "expired": false,
+            "start_time": "2024-01-01T12:00:00Z"
         }
+    }
+}
+```
+
+### GET `/api/conversation/{conversation_id}/countdown`
+Lấy thông tin countdown:
+```json
+{
+    "success": true,
+    "data": {
+        "conversation_id": 123,
+        "time_left": 245,
+        "expired": false,
+        "both_kept": false,
+        "start_time": "2024-01-01T12:00:00Z"
     }
 }
 ```
@@ -120,19 +150,33 @@ Cập nhật keep status và trả về:
 }
 ```
 
+## Migration
+
+### Chạy migration script
+```bash
+python migrate_countdown.py
+```
+
+### Build script tự động
+```bash
+# build.sh sẽ tự động chạy migration
+chmod +x build.sh && ./build.sh
+```
+
 ## Testing
 
-### Chạy test script
+### Chạy test script đồng bộ
 ```bash
-python test_countdown_timer.py
+python test_sync_countdown.py
 ```
 
 ### Test manual trên frontend
 1. Mở 2 tab browser
 2. Đăng nhập với 2 user khác nhau
 3. Vào chat room và quan sát countdown
-4. Test Keep button
-5. Đợi countdown kết thúc
+4. Reload trang và kiểm tra countdown không bị reset
+5. Test Keep button
+6. Đợi countdown kết thúc
 
 ## Cấu hình
 
@@ -141,24 +185,38 @@ python test_countdown_timer.py
 this.countdownDuration = 5 * 60; // 5 phút = 300 giây
 ```
 
+### Sync interval
+```javascript
+// Sync với server mỗi 30 giây
+setInterval(() => {
+    this.syncCountdownWithServer();
+}, 30000);
+```
+
 ### Màu sắc và animation
 - Có thể điều chỉnh trong `updateCountdownDisplay()`
 - CSS animations có thể tùy chỉnh trong `style.css`
 
 ## Lưu ý quan trọng
 
-1. **Dừng countdown**: Khi cả 2 người đã keep
-2. **Tự động kết thúc**: Khi countdown về 0
-3. **Cleanup**: Countdown được dừng khi logout hoặc kết thúc conversation
-4. **Real-time**: WebSocket cập nhật keep status real-time
-5. **Persistent**: Keep status được lưu trong database
+1. **Database Migration**: Cần chạy migration để thêm cột `countdown_start_time`
+2. **Server-Side Time**: Countdown dựa trên thời gian server, không phải client
+3. **Cross-User Sync**: Tất cả user trong conversation thấy cùng thời gian
+4. **Reload Persistence**: Countdown không bị reset khi reload trang
+5. **Real-time Updates**: WebSocket cập nhật keep status real-time
+6. **Auto Cleanup**: Countdown được dừng khi logout hoặc kết thúc conversation
 
 ## Troubleshooting
 
-### Countdown không hiển thị
-- Kiểm tra console log
-- Đảm bảo `showChatInterface()` được gọi
-- Kiểm tra WebSocket connection
+### Countdown không đồng bộ
+- Kiểm tra server time
+- Đảm bảo migration đã chạy thành công
+- Kiểm tra `countdown_start_time` trong database
+
+### Countdown bị reset khi reload
+- Kiểm tra `countdownStartTime` từ API response
+- Đảm bảo `calculateTimeLeftFromServer()` hoạt động đúng
+- Kiểm tra timezone settings
 
 ### Keep button không hoạt động
 - Kiểm tra API response
