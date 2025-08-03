@@ -123,8 +123,7 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 class WebSocketHandler:
-    def __init__(self, db: Session):
-        self.db = db
+    def __init__(self):
         self.manager = manager
     
     async def handle_websocket(self, websocket: WebSocket, user_id: int):
@@ -151,17 +150,25 @@ class WebSocketHandler:
     async def auto_add_to_conversation(self, user_id: int):
         """Tự động thêm user vào conversation nếu họ đang trong một conversation"""
         try:
-            # Tìm conversation active mà user đang tham gia
-            conversation = self.db.query(Conversation).filter(
-                Conversation.is_active == True,
-                ((Conversation.user1_id == user_id) | (Conversation.user2_id == user_id))
-            ).first()
+            # Tạo database session mới
+            from app.database import SessionLocal
+            db = SessionLocal()
             
-            if conversation:
-                print(f"Auto-adding user {user_id} to conversation {conversation.id}")
-                self.manager.add_to_conversation(conversation.id, user_id)
-            else:
-                print(f"User {user_id} is not in any active conversation")
+            try:
+                # Tìm conversation active mà user đang tham gia
+                conversation = db.query(Conversation).filter(
+                    Conversation.is_active == True,
+                    ((Conversation.user1_id == user_id) | (Conversation.user2_id == user_id))
+                ).first()
+                
+                if conversation:
+                    print(f"Auto-adding user {user_id} to conversation {conversation.id}")
+                    self.manager.add_to_conversation(conversation.id, user_id)
+                else:
+                    print(f"User {user_id} is not in any active conversation")
+                    
+            finally:
+                db.close()
                 
         except Exception as e:
             print(f"Error auto-adding user to conversation: {e}")
@@ -193,49 +200,60 @@ class WebSocketHandler:
         print(f"   Conversation: {conversation_id}")
         print(f"   Content: {content[:50]}{'...' if len(content) > 50 else ''}")
         
-        # Lưu tin nhắn vào database
-        message = Message(
-            conversation_id=conversation_id,
-            sender_id=user_id,
-            content=content,
-            message_type=message_type
-        )
+        # Tạo database session mới
+        from app.database import SessionLocal
+        db = SessionLocal()
         
-        self.db.add(message)
-        
-        # Cập nhật last_activity của conversation
-        conversation = self.db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if conversation:
-            conversation.last_activity = datetime.now(timezone.utc)
-        
-        self.db.commit()
-        print(f"💾 Message saved to database with ID: {message.id}")
-        
-        # Gửi tin nhắn cho user khác trong conversation
-        message_to_send = {
-            "type": "chat_message",
-            "data": {
-                "id": message.id,
-                "conversation_id": conversation_id,
-                "sender_id": user_id,
-                "content": content,
-                "message_type": message_type,
-                "created_at": message.created_at.isoformat()
-            }
-        }
-        
-        print(f"📤 Broadcasting message to conversation {conversation_id}")
-        
-        # Đảm bảo user được thêm vào conversation trước khi gửi tin nhắn
-        if conversation_id not in self.manager.conversation_connections:
-            print(f"⚠️ Conversation {conversation_id} not in connections, adding users...")
-            # Thêm cả 2 user vào conversation
+        try:
+            # Lưu tin nhắn vào database
+            message = Message(
+                conversation_id=conversation_id,
+                sender_id=user_id,
+                content=content,
+                message_type=message_type
+            )
+            
+            db.add(message)
+            
+            # Cập nhật last_activity của conversation
+            conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
             if conversation:
-                self.manager.add_to_conversation(conversation_id, conversation.user1_id)
-                self.manager.add_to_conversation(conversation_id, conversation.user2_id)
-                print(f"✅ Added users {conversation.user1_id} and {conversation.user2_id} to conversation {conversation_id}")
-        
-        await self.manager.send_to_conversation(message_to_send, conversation_id, exclude_user_id=user_id)
+                conversation.last_activity = datetime.now(timezone.utc)
+            
+            db.commit()
+            print(f"💾 Message saved to database with ID: {message.id}")
+            
+            # Gửi tin nhắn cho user khác trong conversation
+            message_to_send = {
+                "type": "chat_message",
+                "data": {
+                    "id": message.id,
+                    "conversation_id": conversation_id,
+                    "sender_id": user_id,
+                    "content": content,
+                    "message_type": message_type,
+                    "created_at": message.created_at.isoformat()
+                }
+            }
+            
+            print(f"📤 Broadcasting message to conversation {conversation_id}")
+            
+            # Đảm bảo user được thêm vào conversation trước khi gửi tin nhắn
+            if conversation_id not in self.manager.conversation_connections:
+                print(f"⚠️ Conversation {conversation_id} not in connections, adding users...")
+                # Thêm cả 2 user vào conversation
+                if conversation:
+                    self.manager.add_to_conversation(conversation_id, conversation.user1_id)
+                    self.manager.add_to_conversation(conversation_id, conversation.user2_id)
+                    print(f"✅ Added users {conversation.user1_id} and {conversation.user2_id} to conversation {conversation_id}")
+            
+            await self.manager.send_to_conversation(message_to_send, conversation_id, exclude_user_id=user_id)
+            
+        except Exception as e:
+            print(f"❌ Error handling chat message: {e}")
+            db.rollback()
+        finally:
+            db.close()
     
     async def handle_typing(self, user_id: int, data: dict):
         """Xử lý trạng thái typing"""
@@ -253,24 +271,34 @@ class WebSocketHandler:
         if not conversation_id:
             return
         
-        conversation = self.db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if conversation:
-            conversation.set_keep_status(user_id, keep_status)
-            conversation.last_activity = datetime.now(timezone.utc)
-            self.db.commit()
-            
-            # Gửi thông báo keep cho user khác
-            message_to_send = {
-                "type": "keep_status",
-                "data": {
-                    "conversation_id": conversation_id,
-                    "user_id": user_id,
-                    "keep_status": keep_status,
-                    "both_kept": conversation.both_kept()
+        # Tạo database session mới
+        from app.database import SessionLocal
+        db = SessionLocal()
+        
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if conversation:
+                conversation.set_keep_status(user_id, keep_status)
+                conversation.last_activity = datetime.now(timezone.utc)
+                db.commit()
+                
+                # Gửi thông báo keep cho user khác
+                message_to_send = {
+                    "type": "keep_status",
+                    "data": {
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                        "keep_status": keep_status,
+                        "both_kept": conversation.both_kept()
+                    }
                 }
-            }
-            
-            await self.manager.send_to_conversation(message_to_send, conversation_id, exclude_user_id=user_id)
+                
+                await self.manager.send_to_conversation(message_to_send, conversation_id, exclude_user_id=user_id)
+        except Exception as e:
+            print(f"❌ Error handling keep: {e}")
+            db.rollback()
+        finally:
+            db.close()
     
     async def handle_end_conversation(self, user_id: int, data: dict):
         """Xử lý kết thúc conversation"""
@@ -279,19 +307,28 @@ class WebSocketHandler:
         if not conversation_id:
             return
         
-        conversation = self.db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if conversation:
-            # Gửi thông báo kết thúc cho tất cả user trong conversation
-            message_to_send = {
-                "type": "conversation_ended",
-                "data": {
-                    "conversation_id": conversation_id,
-                    "ended_by": user_id,
-                    "redirect_to_waiting": True
+        # Tạo database session mới
+        from app.database import SessionLocal
+        db = SessionLocal()
+        
+        try:
+            conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if conversation:
+                # Gửi thông báo kết thúc cho tất cả user trong conversation
+                message_to_send = {
+                    "type": "conversation_ended",
+                    "data": {
+                        "conversation_id": conversation_id,
+                        "ended_by": user_id,
+                        "redirect_to_waiting": True
+                    }
                 }
-            }
-            
-            await self.manager.send_to_conversation(message_to_send, conversation_id)
-            
-            # Xóa tất cả user khỏi conversation connections
-            self.manager.remove_from_conversation(conversation_id, user_id) 
+                
+                await self.manager.send_to_conversation(message_to_send, conversation_id)
+                
+                # Xóa tất cả user khỏi conversation connections
+                self.manager.remove_from_conversation(conversation_id, user_id)
+        except Exception as e:
+            print(f"❌ Error handling end conversation: {e}")
+        finally:
+            db.close() 

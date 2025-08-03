@@ -1,11 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from typing import List
 import os
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 
 from app.database import engine, get_db
 from app.models import Base, User, Conversation, Message
@@ -51,6 +52,77 @@ GOAL_OPTIONS = [
     "Mối quan hệ mở",
     "Kết bạn mới thôi 🥰"
 ]
+
+# Background task để tự động xóa conversation hết countdown
+async def cleanup_expired_conversations():
+    """Background task để tự động xóa các conversation đã hết countdown"""
+    while True:
+        try:
+            # Tạo session mới cho background task
+            from app.database import SessionLocal
+            db = SessionLocal()
+            
+            try:
+                # Tìm các conversation đã hết countdown và chưa được keep
+                expired_conversations = db.query(Conversation).filter(
+                    Conversation.is_active == True,
+                    Conversation.user1_keep == False,
+                    Conversation.user2_keep == False
+                ).all()
+                
+                matching_service = MatchingService(db)
+                cleaned_count = 0
+                
+                for conversation in expired_conversations:
+                    try:
+                        if conversation.is_countdown_expired():
+                            print(f"Auto ending conversation {conversation.id} due to countdown expiration")
+                            
+                            # Kết thúc conversation
+                            matching_service.end_conversation(conversation)
+                            cleaned_count += 1
+                            
+                            # Gửi thông báo kết thúc cho tất cả user trong conversation
+                            message_to_send = {
+                                "type": "conversation_ended",
+                                "data": {
+                                    "conversation_id": conversation.id,
+                                    "ended_by": "system",
+                                    "reason": "countdown_expired",
+                                    "redirect_to_waiting": True,
+                                    "redirect_url": "/"
+                                }
+                            }
+                            
+                            # Gửi thông báo cho tất cả user trong conversation
+                            await manager.send_to_conversation(message_to_send, conversation.id)
+                            
+                            # Xóa khỏi WebSocket connections
+                            manager.remove_from_conversation(conversation.id, conversation.user1_id)
+                            manager.remove_from_conversation(conversation.id, conversation.user2_id)
+                    except Exception as e:
+                        print(f"Error processing conversation {conversation.id}: {e}")
+                        continue
+                
+                if cleaned_count > 0:
+                    print(f"Cleaned up {cleaned_count} expired conversations")
+                    
+            except Exception as e:
+                print(f"Error in cleanup_expired_conversations database operation: {e}")
+            finally:
+                db.close()
+                
+        except Exception as e:
+            print(f"Error in cleanup_expired_conversations: {e}")
+        
+        # Chạy mỗi 30 giây
+        await asyncio.sleep(30)
+
+# Startup event để bắt đầu background task
+@app.on_event("startup")
+async def startup_event():
+    """Khởi động background task khi app start"""
+    asyncio.create_task(cleanup_expired_conversations())
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -215,110 +287,142 @@ async def start_search(
     db: Session = Depends(get_db)
 ):
     """Bắt đầu tìm kiếm chat hoặc voice call"""
-    # Kiểm tra user đã hoàn thành hồ sơ chưa
-    if not current_user.nickname:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Vui lòng hoàn thành hồ sơ trước khi tìm kiếm"
-        )
-    
-    # Kiểm tra xem user đã có conversation active chưa
-    existing_conversation = db.query(Conversation).filter(
-        ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id)) &
-        (Conversation.is_active == True)
-    ).first()
-    
-    if existing_conversation:
-        # User đã có conversation active, trả về thông tin conversation
-        other_user_id = existing_conversation.user2_id if existing_conversation.user1_id == current_user.id else existing_conversation.user1_id
-        other_user = db.query(User).filter(User.id == other_user_id).first()
-        
-        # Thêm vào WebSocket connections nếu chưa có
-        manager.add_to_conversation(existing_conversation.id, current_user.id)
-        
-        return SuccessResponse(
-            success=True,
-            message="Đã tìm thấy người phù hợp",
-            data={
-                "conversation_id": existing_conversation.id,
-                "conversation_type": existing_conversation.conversation_type,
-                "chat_url": f"/chat/{existing_conversation.id}",
-                "matched_user": {
-                    "id": other_user.id,
-                    "nickname": other_user.nickname
-                }
-            }
-        )
-    
-    # Cập nhật trạng thái user
-    current_user.state = "searching"
-    db.commit()
-    
-    # Tìm kiếm ghép nối
-    matching_service = MatchingService(db)
-    match = matching_service.find_match(current_user, search_data.search_type)
-    
-    if match:
-        try:
-            # Tạo conversation
-            conversation = matching_service.create_conversation(
-                current_user, match, search_data.search_type
+    try:
+        # Kiểm tra user đã hoàn thành hồ sơ chưa
+        if not current_user.nickname:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Vui lòng hoàn thành hồ sơ trước khi tìm kiếm"
             )
+        
+        # Kiểm tra xem user đã có conversation active chưa
+        existing_conversation = db.query(Conversation).filter(
+            ((Conversation.user1_id == current_user.id) | (Conversation.user2_id == current_user.id)) &
+            (Conversation.is_active == True)
+        ).first()
+        
+        if existing_conversation:
+            # User đã có conversation active, trả về thông tin conversation
+            other_user_id = existing_conversation.user2_id if existing_conversation.user1_id == current_user.id else existing_conversation.user1_id
+            other_user = db.query(User).filter(User.id == other_user_id).first()
             
-            # Thêm vào WebSocket connections
-            manager.add_to_conversation(conversation.id, current_user.id)
-            manager.add_to_conversation(conversation.id, match.id)
-            
-            # Gửi thông báo match qua WebSocket cho cả 2 user với URL redirect
-            match_notification = {
-                "type": "match_found",
-                "data": {
-                    "conversation_id": conversation.id,
-                    "conversation_type": conversation.conversation_type,
-                    "chat_url": f"/chat/{conversation.id}",
-                    "matched_user": {
-                        "id": match.id,
-                        "nickname": match.nickname
-                    }
-                }
-            }
-            
-            # Gửi thông báo cho user hiện tại
-            await manager.send_personal_message(match_notification, current_user.id)
-            
-            # Gửi thông báo cho user được match
-            await manager.send_personal_message(match_notification, match.id)
+            # Thêm vào WebSocket connections nếu chưa có
+            manager.add_to_conversation(existing_conversation.id, current_user.id)
             
             return SuccessResponse(
                 success=True,
                 message="Đã tìm thấy người phù hợp",
                 data={
-                    "conversation_id": conversation.id,
-                    "conversation_type": conversation.conversation_type,
-                    "chat_url": f"/chat/{conversation.id}",
+                    "conversation_id": existing_conversation.id,
+                    "conversation_type": existing_conversation.conversation_type,
+                    "chat_url": f"/chat/{existing_conversation.id}",
                     "matched_user": {
-                        "id": match.id,
-                        "nickname": match.nickname
+                        "id": other_user.id,
+                        "nickname": other_user.nickname
                     }
                 }
             )
-        except ValueError as e:
-            # Nếu có lỗi khi tạo conversation (ví dụ: user đã được match với người khác)
-            # Quay lại trạng thái searching và tiếp tục tìm kiếm
-            current_user.state = "searching"
-            db.commit()
-            
+        
+        # Kiểm tra xem user đã đang trong trạng thái searching chưa
+        if current_user.state == "searching":
             return SuccessResponse(
                 success=True,
                 message="Đang tìm kiếm...",
                 data={"status": "searching"}
             )
         
-    else:
-        return SuccessResponse(
-            success=True,
-            message="Đang tìm kiếm...",
-            data={"status": "searching"}
+        # Cập nhật trạng thái user
+        current_user.state = "searching"
+        db.commit()
+        
+        # Tìm kiếm ghép nối
+        matching_service = MatchingService(db)
+        match = matching_service.find_match(current_user, search_data.search_type)
+        
+        if match:
+            try:
+                # Tạo conversation
+                conversation = matching_service.create_conversation(
+                    current_user, match, search_data.search_type
+                )
+                
+                # Thêm vào WebSocket connections
+                manager.add_to_conversation(conversation.id, current_user.id)
+                manager.add_to_conversation(conversation.id, match.id)
+                
+                # Gửi thông báo match qua WebSocket cho cả 2 user với URL redirect
+                match_notification = {
+                    "type": "match_found",
+                    "data": {
+                        "conversation_id": conversation.id,
+                        "conversation_type": conversation.conversation_type,
+                        "chat_url": f"/chat/{conversation.id}",
+                        "matched_user": {
+                            "id": match.id,
+                            "nickname": match.nickname
+                        }
+                    }
+                }
+                
+                # Gửi thông báo cho user hiện tại
+                await manager.send_personal_message(match_notification, current_user.id)
+                
+                # Gửi thông báo cho user được match
+                await manager.send_personal_message(match_notification, match.id)
+                
+                return SuccessResponse(
+                    success=True,
+                    message="Đã tìm thấy người phù hợp",
+                    data={
+                        "conversation_id": conversation.id,
+                        "conversation_type": conversation.conversation_type,
+                        "chat_url": f"/chat/{conversation.id}",
+                        "matched_user": {
+                            "id": match.id,
+                            "nickname": match.nickname
+                        }
+                    }
+                )
+            except ValueError as e:
+                # Nếu có lỗi khi tạo conversation (ví dụ: user đã được match với người khác)
+                # Quay lại trạng thái searching và tiếp tục tìm kiếm
+                current_user.state = "searching"
+                db.commit()
+                
+                return SuccessResponse(
+                    success=True,
+                    message="Đang tìm kiếm...",
+                    data={"status": "searching"}
+                )
+            except Exception as e:
+                # Nếu có lỗi khác, quay về trạng thái waiting
+                current_user.state = "waiting"
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Lỗi khi tạo conversation: {str(e)}"
+                )
+            
+        else:
+            return SuccessResponse(
+                success=True,
+                message="Đang tìm kiếm...",
+                data={"status": "searching"}
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Đảm bảo user được đưa về trạng thái waiting nếu có lỗi
+        try:
+            current_user.state = "waiting"
+            db.commit()
+        except:
+            pass
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Lỗi server: {str(e)}"
         )
 
 @app.post("/keep", response_model=SuccessResponse)
@@ -528,10 +632,55 @@ async def get_countdown_status(
     )
 
 @app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, user_id: int):
     """WebSocket endpoint cho real-time communication"""
-    handler = WebSocketHandler(db)
-    await handler.handle_websocket(websocket, user_id)
+    # Xác thực user trước khi kết nối WebSocket
+    try:
+        # Lấy token từ query parameter hoặc header
+        token = websocket.query_params.get("token")
+        if not token:
+            # Thử lấy từ header
+            auth_header = websocket.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        
+        if not token:
+            await websocket.close(code=4001, reason="Missing authentication token")
+            return
+        
+        # Verify token
+        from app.auth import verify_token
+        payload = verify_token(token)
+        if not payload:
+            await websocket.close(code=4001, reason="Invalid authentication token")
+            return
+        
+        username = payload.get("sub")
+        if not username:
+            await websocket.close(code=4001, reason="Invalid token payload")
+            return
+        
+        # Verify user exists and matches the user_id in URL
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.username == username, User.id == user_id).first()
+            if not user:
+                await websocket.close(code=4001, reason="User not found or ID mismatch")
+                return
+        finally:
+            db.close()
+        
+        # Kết nối WebSocket
+        handler = WebSocketHandler()
+        await handler.handle_websocket(websocket, user_id)
+        
+    except Exception as e:
+        print(f"WebSocket connection error: {e}")
+        try:
+            await websocket.close(code=4000, reason="Internal server error")
+        except:
+            pass
 
 @app.get("/api/searching-count")
 async def get_searching_count(db: Session = Depends(get_db)):
@@ -555,6 +704,56 @@ async def get_searching_count(db: Session = Depends(get_db)):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "Mapmo.vn"}
+
+@app.post("/api/admin/cleanup-expired", response_model=SuccessResponse)
+async def cleanup_expired_conversations_manual(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Endpoint để manually cleanup các conversation đã hết countdown (cho admin)"""
+    try:
+        # Tìm các conversation đã hết countdown và chưa được keep
+        expired_conversations = db.query(Conversation).filter(
+            Conversation.is_active == True,
+            Conversation.user1_keep == False,
+            Conversation.user2_keep == False
+        ).all()
+        
+        cleaned_count = 0
+        matching_service = MatchingService(db)
+        
+        for conversation in expired_conversations:
+            if conversation.is_countdown_expired():
+                # Kết thúc conversation
+                matching_service.end_conversation(conversation)
+                cleaned_count += 1
+                
+                # Gửi thông báo kết thúc cho tất cả user trong conversation
+                message_to_send = {
+                    "type": "conversation_ended",
+                    "data": {
+                        "conversation_id": conversation.id,
+                        "ended_by": "system",
+                        "reason": "countdown_expired",
+                        "redirect_to_waiting": True,
+                        "redirect_url": "/"
+                    }
+                }
+                
+                # Gửi thông báo cho tất cả user trong conversation
+                await manager.send_to_conversation(message_to_send, conversation.id)
+                
+                # Xóa khỏi WebSocket connections
+                manager.remove_from_conversation(conversation.id, conversation.user1_id)
+                manager.remove_from_conversation(conversation.id, conversation.user2_id)
+        
+        return SuccessResponse(
+            success=True,
+            message=f"Đã cleanup {cleaned_count} conversation hết countdown"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi cleanup: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

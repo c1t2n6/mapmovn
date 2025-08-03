@@ -8,7 +8,9 @@
 - **Thiết lập hồ sơ**: 4 bước thiết lập thông tin cá nhân
 - **Ghép nối thông minh**: Thuật toán ghép nối dựa trên sở thích và mong muốn
 - **Chat ẩn danh**: Trò chuyện real-time với WebSocket
+- **Countdown Timer**: Đếm ngược 5 phút cho mỗi cuộc trò chuyện
 - **Nút Keep**: Duy trì kết nối giữa hai người dùng
+- **Tự động xóa phòng**: Kết thúc và xóa phòng khi countdown hết thời gian
 - **Giao diện đẹp**: Thiết kế hiện đại với hiệu ứng động
 
 ## Công nghệ sử dụng
@@ -189,10 +191,17 @@ MM_Grok/
 
 ## Tính năng đặc biệt
 
+### Countdown Timer & Tự động xóa phòng
+- **Countdown 5 phút**: Mỗi cuộc trò chuyện có thời gian 5 phút
+- **Tự động xóa**: Khi countdown hết, phòng chat tự động bị xóa
+- **Background task**: Hệ thống tự động kiểm tra và xóa phòng hết thời gian
+- **Sync real-time**: Frontend đồng bộ với server mỗi 30 giây
+
 ### Nút Keep
 - Một người nhấn: Trái tim đầy một nửa 💗
 - Cả hai nhấn: Trái tim đầy hoàn toàn 💖
 - Duy trì cuộc trò chuyện không bị tự hủy
+- **Dừng countdown**: Khi cả 2 keep, countdown dừng lại vĩnh viễn
 
 ### Voice Call (Tương lai)
 - Mở khóa sau 5 phút chat
@@ -229,6 +238,9 @@ pytest
 
 # Chạy với coverage
 pytest --cov=app
+
+# Test tính năng countdown và xóa phòng
+python test_countdown_cleanup.py
 ```
 
 ## Deployment

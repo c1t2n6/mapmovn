@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
 import json
+from datetime import datetime, timezone
 
 class User(Base):
     __tablename__ = "users"
@@ -76,12 +77,18 @@ class Conversation(Base):
     
     def get_countdown_time_left(self):
         """Tính toán thời gian còn lại của countdown (5 phút = 300 giây)"""
-        from datetime import datetime, timezone
         if not self.countdown_start_time:
             return 300  # 5 phút mặc định
         
+        # Đảm bảo sử dụng UTC timezone
+        if self.countdown_start_time.tzinfo is None:
+            # Nếu không có timezone, giả sử là UTC
+            start_time = self.countdown_start_time.replace(tzinfo=timezone.utc)
+        else:
+            start_time = self.countdown_start_time
+        
         now = datetime.now(timezone.utc)
-        elapsed = (now - self.countdown_start_time).total_seconds()
+        elapsed = (now - start_time).total_seconds()
         time_left = 300 - elapsed  # 300 giây = 5 phút
         
         return max(0, int(time_left))

@@ -726,12 +726,22 @@ class MapmoApp {
         // Sử dụng URL động thay vì hardcode localhost
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-        const wsUrl = `${protocol}//${host}/ws/${this.currentUser.id}`;
+        const token = localStorage.getItem('access_token');
+        
+        if (!token) {
+            console.error('No access token available for WebSocket connection');
+            return;
+        }
+        
+        // Thêm token vào URL query parameter
+        const wsUrl = `${protocol}//${host}/ws/${this.currentUser.id}?token=${encodeURIComponent(token)}`;
         
         this.websocket = new WebSocket(wsUrl);
         
         this.websocket.onopen = () => {
             console.log('WebSocket connected');
+            // Reset reconnection attempts on successful connection
+            this.reconnectionAttempts = 0;
         };
         
         this.websocket.onmessage = async (event) => {
@@ -739,9 +749,54 @@ class MapmoApp {
             await this.handleWebSocketMessage(data);
         };
         
-        this.websocket.onclose = () => {
-            console.log('WebSocket disconnected');
+        this.websocket.onclose = (event) => {
+            console.log('WebSocket disconnected:', event.code, event.reason);
+            
+            // Handle authentication errors
+            if (event.code === 4001) {
+                console.error('WebSocket authentication failed:', event.reason);
+                this.showError('Phiên đăng nhập đã hết hạn');
+                setTimeout(() => {
+                    this.handleLogout();
+                }, 2000);
+                return;
+            }
+            
+            // Attempt reconnection for other errors
+            if (event.code !== 1000) { // 1000 = normal closure
+                this.attemptReconnection();
+            }
         };
+        
+        this.websocket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+    }
+    
+    attemptReconnection() {
+        if (!this.reconnectionAttempts) {
+            this.reconnectionAttempts = 0;
+        }
+        
+        const maxAttempts = 5;
+        const baseDelay = 1000; // 1 second
+        
+        if (this.reconnectionAttempts >= maxAttempts) {
+            console.error('Max reconnection attempts reached');
+            this.showError('Mất kết nối. Vui lòng tải lại trang.');
+            return;
+        }
+        
+        this.reconnectionAttempts++;
+        const delay = baseDelay * Math.pow(2, this.reconnectionAttempts - 1); // Exponential backoff
+        
+        console.log(`Attempting WebSocket reconnection ${this.reconnectionAttempts}/${maxAttempts} in ${delay}ms`);
+        
+        setTimeout(() => {
+            if (this.currentUser && this.currentUser.id) {
+                this.connectWebSocket();
+            }
+        }, delay);
     }
     
     async handleWebSocketMessage(data) {
@@ -994,13 +1049,18 @@ class MapmoApp {
             this.websocket.close();
         }
         
-        this.showSuccess('Cuộc trò chuyện đã kết thúc');
+        // Hiển thị thông báo phù hợp dựa trên lý do kết thúc
+        if (data.reason === 'countdown_expired') {
+            this.showError('Hết thời gian! Cuộc trò chuyện đã kết thúc.');
+        } else {
+            this.showSuccess('Cuộc trò chuyện đã kết thúc');
+        }
         
         // Redirect về trang chủ hoặc URL được chỉ định
         setTimeout(() => {
             const redirectUrl = data.redirect_url || '/';
             window.location.href = redirectUrl;
-        }, 1500);
+        }, 2000);
     }
     
     async handleLogout() {
@@ -1103,12 +1163,22 @@ class MapmoApp {
             return this.countdownDuration;
         }
         
-        const startTime = new Date(this.countdownStartTime);
-        const now = new Date();
-        const elapsed = Math.floor((now - startTime) / 1000);
-        const timeLeft = this.countdownDuration - elapsed;
-        
-        return Math.max(0, timeLeft);
+        try {
+            const startTime = new Date(this.countdownStartTime);
+            const now = new Date();
+            
+            // Đảm bảo cả hai đều sử dụng UTC
+            const startTimeUTC = new Date(startTime.getTime() - (startTime.getTimezoneOffset() * 60000));
+            const nowUTC = new Date(now.getTime() - (now.getTimezoneOffset() * 60000));
+            
+            const elapsed = Math.floor((nowUTC - startTimeUTC) / 1000);
+            const timeLeft = this.countdownDuration - elapsed;
+            
+            return Math.max(0, timeLeft);
+        } catch (error) {
+            console.error('Error calculating time left from server:', error);
+            return this.countdownDuration;
+        }
     }
     
     async syncCountdownWithServer() {
@@ -1130,8 +1200,9 @@ class MapmoApp {
                 // Cập nhật trạng thái keep
                 this.setBothKeptStatus(serverBothKept);
                 
-                // Nếu countdown đã hết thời gian và chưa keep, kết thúc
+                // Nếu countdown đã hết thời gian và chưa keep, kết thúc ngay lập tức
                 if (serverExpired && !this.bothKept) {
+                    console.log('Countdown expired on server, ending conversation immediately');
                     this.endCountdown();
                     return;
                 }
@@ -1141,9 +1212,28 @@ class MapmoApp {
                     this.countdownTimeLeft = serverTimeLeft;
                     console.log('Countdown synced with server');
                 }
+                
+                // Nếu thời gian còn lại <= 0, kết thúc ngay
+                if (this.countdownTimeLeft <= 0 && !this.bothKept) {
+                    console.log('Countdown time left <= 0, ending conversation');
+                    this.endCountdown();
+                    return;
+                }
+            } else if (response.status === 404) {
+                // Conversation không tồn tại, kết thúc
+                console.log('Conversation not found, ending');
+                this.handleConversationEnded({ redirect_url: '/' });
+            } else if (response.status === 401) {
+                // Token hết hạn
+                console.log('Token expired during countdown sync');
+                this.showError('Phiên đăng nhập đã hết hạn');
+                setTimeout(() => {
+                    this.handleLogout();
+                }, 2000);
             }
         } catch (error) {
             console.error('Error syncing countdown with server:', error);
+            // Không làm gì nếu có lỗi network, tiếp tục với countdown local
         }
     }
     
@@ -1196,10 +1286,8 @@ class MapmoApp {
         this.stopCountdown();
         this.showError('Hết thời gian! Cuộc trò chuyện sẽ kết thúc.');
         
-        // Tự động kết thúc conversation sau 2 giây
-        setTimeout(() => {
-            this.endConversation();
-        }, 2000);
+        // Kết thúc conversation ngay lập tức khi countdown hết
+        this.endConversation();
     }
     
     setBothKeptStatus(bothKept) {
