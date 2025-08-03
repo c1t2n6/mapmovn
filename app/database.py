@@ -1,18 +1,40 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
-from dotenv import load_dotenv
+from sqlalchemy.pool import QueuePool
+from app.config import settings
 
-load_dotenv()
+# Tối ưu hóa engine với connection pooling và các cấu hình hiệu suất
+if "sqlite" in settings.DATABASE_URL:
+    engine = create_engine(
+        settings.DATABASE_URL, 
+        connect_args={"check_same_thread": False},
+        poolclass=QueuePool,
+        pool_size=20,
+        max_overflow=30,
+        pool_pre_ping=True,
+        pool_recycle=3600,  # Recycle connections every hour
+        echo=settings.ENABLE_SQL_LOGGING  # Set to True for SQL debugging
+    )
+else:
+    # PostgreSQL configuration
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=20,
+        max_overflow=30,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        echo=settings.ENABLE_SQL_LOGGING
+    )
 
-# Database URL - sử dụng SQLite cho development
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./mapmo.db")
-
-engine = create_engine(
-    DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+# Tối ưu hóa session với các cấu hình hiệu suất
+SessionLocal = sessionmaker(
+    autocommit=False, 
+    autoflush=False, 
+    bind=engine,
+    expire_on_commit=False  # Prevent lazy loading issues
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 

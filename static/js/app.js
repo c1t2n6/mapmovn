@@ -5,6 +5,7 @@ class MapmoApp {
         this.currentConversation = null;
         this.websocket = null;
         this.pendingTempMessage = null; // Tin nhắn tạm thời đang chờ
+        this.typingTimeout = null; // Timeout cho typing indicator
         
         // Countdown timer properties
         this.countdownTimer = null;
@@ -745,18 +746,29 @@ class MapmoApp {
         this.websocket = new WebSocket(wsUrl);
         
         this.websocket.onopen = () => {
-            console.log('WebSocket connected');
+            console.log('✅ WebSocket connected');
             // Reset reconnection attempts on successful connection
             this.reconnectionAttempts = 0;
         };
         
         this.websocket.onmessage = async (event) => {
-            const data = JSON.parse(event.data);
-            await this.handleWebSocketMessage(data);
+            try {
+                const data = JSON.parse(event.data);
+                
+                // Handle ping/pong để keep connection alive
+                if (data.type === 'ping') {
+                    this.websocket.send(JSON.stringify({ type: 'pong' }));
+                    return;
+                }
+                
+                await this.handleWebSocketMessage(data);
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+            }
         };
         
         this.websocket.onclose = (event) => {
-            console.log('WebSocket disconnected:', event.code, event.reason);
+            console.log('❌ WebSocket disconnected:', event.code, event.reason);
             
             // Handle authentication errors
             if (event.code === 4001) {
@@ -943,23 +955,55 @@ class MapmoApp {
         
         this.addMessage(tempMessage);
         
-        const message = {
+        // Clear input ngay lập tức để UX tốt hơn
+        input.value = '';
+        
+        // Lưu temp message để có thể xóa sau khi nhận được tin nhắn thật
+        this.pendingTempMessage = tempMessage;
+        
+        // Gửi tin nhắn qua WebSocket với retry logic
+        this.sendMessageWithRetry({
             type: 'chat_message',
             data: {
                 conversation_id: this.currentConversation.conversation_id,
                 content: content,
                 message_type: 'text'
             }
-        };
+        });
+    }
+    
+    sendMessageWithRetry(message, retryCount = 0) {
+        const maxRetries = 3;
         
-        this.websocket.send(JSON.stringify(message));
-        input.value = '';
-        
-        // Lưu temp message để có thể xóa sau khi nhận được tin nhắn thật
-        this.pendingTempMessage = tempMessage;
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            try {
+                this.websocket.send(JSON.stringify(message));
+            } catch (error) {
+                console.error('Error sending message:', error);
+                if (retryCount < maxRetries) {
+                    setTimeout(() => {
+                        this.sendMessageWithRetry(message, retryCount + 1);
+                    }, 1000 * (retryCount + 1)); // Exponential backoff
+                }
+            }
+        } else {
+            if (retryCount < maxRetries) {
+                setTimeout(() => {
+                    this.sendMessageWithRetry(message, retryCount + 1);
+                }, 1000 * (retryCount + 1));
+            } else {
+                this.showError('Không thể gửi tin nhắn. Vui lòng thử lại.');
+            }
+        }
     }
     
     handleTyping() {
+        // Debounce typing events để tránh spam
+        if (this.typingTimeout) {
+            clearTimeout(this.typingTimeout);
+        }
+        
+        // Gửi typing status ngay lập tức
         const message = {
             type: 'typing',
             data: {
@@ -968,9 +1012,10 @@ class MapmoApp {
             }
         };
         
-        this.websocket.send(JSON.stringify(message));
+        this.sendMessageWithRetry(message);
         
-        setTimeout(() => {
+        // Auto-stop typing sau 1 giây
+        this.typingTimeout = setTimeout(() => {
             const stopTypingMessage = {
                 type: 'typing',
                 data: {
@@ -978,7 +1023,7 @@ class MapmoApp {
                     is_typing: false
                 }
             };
-            this.websocket.send(JSON.stringify(stopTypingMessage));
+            this.sendMessageWithRetry(stopTypingMessage);
         }, 1000);
     }
     

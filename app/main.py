@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from typing import List
 import os
 import asyncio
+import random
+import json
 from datetime import datetime, timedelta
 
 from app.database import engine, get_db
@@ -21,6 +23,96 @@ from app.websocket_manager import WebSocketHandler, manager
 
 # Tạo database tables
 Base.metadata.create_all(bind=engine)
+
+def create_default_users():
+    """Tạo 3 tài khoản mặc định: user1, user2, user3 với mật khẩu 'password'"""
+    from app.database import SessionLocal
+    
+    db = SessionLocal()
+    try:
+        # Danh sách tên ngẫu nhiên
+        random_names = [
+            "An", "Bình", "Cường", "Dung", "Em", "Phương", "Giang", "Hoa", "Iris", "Jade",
+            "Khang", "Linh", "Minh", "Nga", "Oanh", "Phúc", "Quỳnh", "Rosa", "Sơn", "Thảo",
+            "Uyên", "Vân", "Xuân", "Yến", "Zoe", "Alpha", "Beta", "Charlie", "Delta", "Echo"
+        ]
+        
+        # Danh sách sở thích ngẫu nhiên
+        random_interests_lists = [
+            ["Tập gym 💪", "Chụp ảnh 📷", "Du lịch ✈️"],
+            ["Nhảy nhót 💃", "Uống cà phê ☕", "Đọc sách 📚"],
+            ["Chơi game 🎮", "Nghe nhạc 🎧", "Xem phim 🍿"],
+            ["Leo núi 🏔️", "Nghệ thuật 🎨", "Ăn ngon 🥘"],
+            ["Làm tình nguyện ❤️", "Tâm linh ✨", "Thời trang 👗"],
+            ["Tập gym 💪", "Du lịch ✈️", "Nghe nhạc 🎧"],
+            ["Chụp ảnh 📷", "Uống cà phê ☕", "Xem phim 🍿"],
+            ["Nhảy nhót 💃", "Đọc sách 📚", "Ăn ngon 🥘"]
+        ]
+        
+        # Danh sách mục tiêu ngẫu nhiên
+        random_goals = [
+            "Một mối quan hệ nhẹ nhàng, vui vẻ",
+            "Một mối quan hệ nghiêm túc",
+            "Chưa chắc, muốn khám phá thêm",
+            "Kết hôn",
+            "Bạn đời lâu dài",
+            "Mối quan hệ mở",
+            "Kết bạn mới thôi 🥰"
+        ]
+        
+        # Danh sách giới tính và sở thích
+        genders = ["Nam", "Nữ", "Khác"]
+        preferences = ["Nam", "Nữ", "Tất cả"]
+        
+        # Tạo 3 user mặc định
+        default_users = ["user1", "user2", "user3"]
+        
+        for i, username in enumerate(default_users):
+            # Kiểm tra xem user đã tồn tại chưa
+            existing_user = db.query(User).filter(User.username == username).first()
+            if existing_user:
+                print(f"✅ User {username} đã tồn tại, bỏ qua")
+                continue
+            
+            # Tạo thông tin ngẫu nhiên
+            nickname = random.choice(random_names)
+            gender = random.choice(genders)
+            preference = random.choice(preferences)
+            goal = random.choice(random_goals)
+            interests = random.choice(random_interests_lists)
+            
+            # Tạo ngày sinh ngẫu nhiên (18-35 tuổi)
+            current_year = datetime.now().year
+            birth_year = random.randint(current_year - 35, current_year - 18)
+            birth_month = random.randint(1, 12)
+            birth_day = random.randint(1, 28)  # Sử dụng 28 để tránh lỗi tháng 2
+            dob = datetime(birth_year, birth_month, birth_day)
+            
+            # Tạo user mới
+            hashed_password = hash_password("password")
+            new_user = User(
+                username=username,
+                password_hash=hashed_password,
+                nickname=nickname,
+                dob=dob,
+                gender=gender,
+                preference=preference,
+                goal=goal,
+                interests=json.dumps(interests),
+                state="waiting"
+            )
+            
+            db.add(new_user)
+            print(f"✅ Đã tạo user {username} với nickname: {nickname}")
+        
+        db.commit()
+        print("🎉 Hoàn thành tạo 3 tài khoản mặc định!")
+        
+    except Exception as e:
+        print(f"❌ Lỗi khi tạo default users: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 app = FastAPI(title="Mapmo.vn - Anonymous Web Chat", version="1.0.0")
 
@@ -122,7 +214,15 @@ async def cleanup_expired_conversations():
 @app.on_event("startup")
 async def startup_event():
     """Khởi động background task khi app start"""
+    print("🚀 Khởi động server...")
+    
+    # Tạo 3 tài khoản mặc định
+    create_default_users()
+    
+    # Bắt đầu background task
     asyncio.create_task(cleanup_expired_conversations())
+    
+    print("✅ Server đã sẵn sàng!")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
